@@ -224,8 +224,9 @@ fn draw_river_glow(
     let color_idx = get_region_color(mid_x, mid_y, outlets);
     let base_color = WATERSHED_COLORS[color_idx];
 
-    let glow_alpha = 0.1 + flow_normalized * 0.15;
-    let glow_radius = 4.0 + flow_normalized * 10.0;
+    // Subtle glow only for larger rivers
+    let glow_alpha = 0.06 + flow_normalized * 0.12;
+    let glow_radius = 2.0 + flow_normalized * 8.0;
 
     let glow_color = [
         (base_color[0] as f32 * glow_alpha) as u8,
@@ -265,11 +266,12 @@ fn draw_river_segment(
         0.0
     };
 
-    // Thickness based on flow
-    let thickness = 0.4 + flow_normalized.powf(0.6) * 4.0;
+    // Thickness based on flow - very thin for small tributaries, thick for main rivers
+    // Use steeper power curve for more dramatic difference
+    let thickness = 0.15 + flow_normalized.powf(1.5) * 5.0;
 
-    // Brightness based on flow
-    let brightness = 0.4 + flow_normalized * 0.6;
+    // Brightness based on flow - small rivers dimmer but still visible
+    let brightness = 0.5 + flow_normalized * 0.5;
 
     let color = [
         (base_color[0] as f32 * brightness).min(255.0) as u8,
