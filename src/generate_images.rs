@@ -44,19 +44,19 @@ fn render_river_image(
         let x1 = segment.end.0 * scale_x;
         let y1 = segment.end.1 * scale_y;
 
-        // Normalize flow on log scale (handle zero/small values)
-        let flow_norm = if max_flow > 1.0 && segment.flow > 0.0 {
-            (segment.flow.ln().max(0.0) / log_max.max(1.0)).clamp(0.0, 1.0)
+        // Normalize flow on log scale
+        let flow_norm = if log_max > 0.0 {
+            (segment.flow.ln().max(0.0) / log_max).clamp(0.0, 1.0)
         } else {
-            (segment.flow / max_flow.max(1.0)).clamp(0.0, 1.0)
+            0.0
         };
 
-        // Thickness: thin (0.4px) for small streams, thick (7px) for main rivers
-        // Use power of 2.5 for good visual hierarchy
-        let thickness = 0.4 + flow_norm.powf(2.5) * 7.0;
+        // Thickness: very thin (0.2px) for capillaries, thick (8px) for main rivers
+        // Power of 2 gives good balance between tributaries and main channels
+        let thickness = 0.2 + flow_norm.powf(2.0) * 8.0;
 
-        // Brightness: slightly dim for small streams, bright for main rivers
-        let brightness = 0.4 + flow_norm.powf(0.4) * 0.6;
+        // Brightness: slightly dim for tiny streams, bright for main rivers
+        let brightness = 0.3 + flow_norm.powf(0.5) * 0.7;
 
         let color = [
             (RIVER_COLOR[0] as f32 * brightness) as u8,
@@ -149,8 +149,8 @@ fn generate_image(seed: u32, output_path: &Path) {
 
     let terrain_size = 1024;
     let image_size = 2048;
-    let flow_threshold = 0.5;  // Low threshold since sources have explicit flow
-    let num_sources = 150;     // Number of river source points (springs)
+    let flow_threshold = 6.0;  // Captures fine tributaries + boosted main rivers
+    let num_sources = 200;     // Number of main river source points
 
     let config = TerrainConfig {
         width: terrain_size,
@@ -160,7 +160,7 @@ fn generate_image(seed: u32, output_path: &Path) {
     };
     let terrain = Terrain::generate(config);
 
-    // Use discrete source points for rivers
+    // Use hybrid model: capillary tributaries + boosted main rivers from sources
     let hydrology = HydrologyData::simulate_with_sources(
         &terrain,
         flow_threshold,
@@ -168,7 +168,7 @@ fn generate_image(seed: u32, output_path: &Path) {
         num_sources
     );
 
-    println!("  {} river segments from {} sources", hydrology.river_segments.len(), num_sources);
+    println!("  {} river segments", hydrology.river_segments.len());
 
     let img = render_river_image(&hydrology, image_size, image_size, terrain_size, terrain_size);
     img.save(output_path).expect("Failed to save image");
