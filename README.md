@@ -2,7 +2,13 @@
 
 A beautiful procedural river network visualization inspired by watershed maps, written in Rust with GPU-accelerated rendering.
 
-![River Network Example](https://user-images.githubusercontent.com/placeholder/river-network.png)
+![River Network Example](images/hero.png)
+
+## Sample Outputs
+
+| Seed 42 | Seed 1337 | Seed 2024 |
+|---------|-----------|-----------|
+| ![Sample 1](images/river_network_1.png) | ![Sample 2](images/river_network_2.png) | ![Sample 3](images/river_network_3.png) |
 
 ## Features
 
@@ -43,9 +49,22 @@ cd river-procedural-network
 # Build in release mode (recommended for performance)
 cargo build --release
 
-# Run
+# Run interactive GUI (requires display)
 cargo run --release
+
+# Generate PNG images (headless, no GPU required)
+cargo run --release --bin generate-images
 ```
+
+### Generate Images (Headless)
+
+The `generate-images` binary creates beautiful PNG renders without requiring a GPU or display:
+
+```bash
+cargo run --release --bin generate-images
+```
+
+This generates multiple sample images in the `images/` directory.
 
 ## Technical Details
 
@@ -76,14 +95,18 @@ The terrain is generated using multiple layers of Fractal Brownian Motion (fBm) 
 
 ```
 src/
-├── main.rs          # Application entry point and event loop
-├── terrain.rs       # Procedural terrain generation
-├── hydrology.rs     # Flow direction, accumulation, and watershed analysis
-├── renderer.rs      # wgpu rendering pipeline
-├── lib.rs           # Library exports
+├── main.rs             # Interactive GUI application
+├── generate_images.rs  # Headless PNG image generator
+├── terrain.rs          # Procedural terrain generation
+├── hydrology.rs        # Flow direction, accumulation, and watershed analysis
+├── renderer.rs         # wgpu GPU rendering pipeline
+├── lib.rs              # Library exports
 └── shaders/
     ├── river.wgsl      # River rendering shader
     └── background.wgsl # Background rendering shader
+images/
+├── hero.png            # Main showcase image
+└── river_network_*.png # Sample outputs with different seeds
 ```
 
 ## Dependencies

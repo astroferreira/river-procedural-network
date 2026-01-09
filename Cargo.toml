@@ -23,6 +23,17 @@ env_logger = "0.11"
 log = "0.4"
 rayon = "1.8"
 
+# Image output
+image = "0.24"
+
+[[bin]]
+name = "river-procedural-network"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate-images"
+path = "src/generate_images.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
