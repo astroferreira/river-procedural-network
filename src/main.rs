@@ -2,7 +2,10 @@
 //!
 //! A beautiful visualization of procedurally generated river networks
 //! inspired by watershed maps. Features GPU-accelerated rendering with
-//! realistic hydrology simulation.
+//! realistic hydrology simulation using particle-based hydraulic erosion.
+//!
+//! Based on Nick McDonald's procedural hydrology:
+//! https://nickmcd.me/2020/04/15/procedural-hydrology/
 //!
 //! Controls:
 //! - Mouse drag: Pan the view
@@ -10,15 +13,19 @@
 //! - Space: Generate new random terrain
 //! - R: Reset view
 //! - +/-: Adjust flow threshold
+//! - E: Toggle erosion mode (particle-based vs D8)
+//! - [/]: Adjust erosion iterations
 //! - Escape: Quit
 
 mod terrain;
 mod hydrology;
 mod renderer;
+mod particle;
 
 use terrain::{Terrain, TerrainConfig};
 use hydrology::HydrologyData;
 use renderer::Renderer;
+use particle::ErosionParams;
 
 use std::time::Instant;
 use winit::{
@@ -45,6 +52,10 @@ struct App {
     flow_threshold: f32,
     seed: u32,
 
+    // Erosion parameters (particle-based simulation)
+    use_erosion: bool,
+    erosion_params: ErosionParams,
+
     // Animation
     start_time: Instant,
 }
@@ -52,7 +63,12 @@ struct App {
 impl App {
     /// Generate new terrain and river network
     fn generate(&mut self) {
-        log::info!("Generating new river network with seed {}...", self.seed);
+        if self.use_erosion {
+            log::info!("Generating river network with particle erosion (seed {}, {} iterations)...",
+                self.seed, self.erosion_params.iterations);
+        } else {
+            log::info!("Generating river network with D8 flow (seed {})...", self.seed);
+        }
 
         let config = TerrainConfig {
             width: self.terrain_size,
@@ -62,7 +78,17 @@ impl App {
         };
 
         let terrain = Terrain::generate(config);
-        let hydrology = HydrologyData::simulate(&terrain, self.flow_threshold);
+
+        let hydrology = if self.use_erosion {
+            HydrologyData::simulate_with_erosion(
+                &terrain,
+                self.flow_threshold,
+                &self.erosion_params,
+                self.seed,
+            )
+        } else {
+            HydrologyData::simulate(&terrain, self.flow_threshold)
+        };
 
         self.renderer.update_river_data(&hydrology, terrain.width, terrain.height);
 
@@ -70,6 +96,28 @@ impl App {
         self.hydrology = Some(hydrology);
 
         log::info!("Generation complete!");
+    }
+
+    /// Toggle between erosion and D8 mode
+    fn toggle_erosion(&mut self) {
+        self.use_erosion = !self.use_erosion;
+        if self.use_erosion {
+            log::info!("Switched to PARTICLE EROSION mode ({} iterations)",
+                self.erosion_params.iterations);
+        } else {
+            log::info!("Switched to D8 FLOW DIRECTION mode");
+        }
+        self.generate();
+    }
+
+    /// Adjust erosion iterations
+    fn adjust_iterations(&mut self, factor: f32) {
+        let new_iters = ((self.erosion_params.iterations as f32) * factor) as usize;
+        self.erosion_params.iterations = new_iters.clamp(10_000, 1_000_000);
+        log::info!("Erosion iterations: {}", self.erosion_params.iterations);
+        if self.use_erosion {
+            self.generate();
+        }
     }
 
     /// Reset view to default
@@ -99,18 +147,21 @@ fn main() {
         .format_timestamp(None)
         .init();
 
-    log::info!("╔════════════════════════════════════════════════════════╗");
-    log::info!("║     Procedural River Network Generator                 ║");
-    log::info!("╠════════════════════════════════════════════════════════╣");
-    log::info!("║  Controls:                                             ║");
-    log::info!("║    Mouse drag  - Pan the view                          ║");
-    log::info!("║    Mouse wheel - Zoom in/out                           ║");
-    log::info!("║    Space       - Generate new random terrain           ║");
-    log::info!("║    R           - Reset view                            ║");
-    log::info!("║    +/-         - Adjust river detail (flow threshold)  ║");
-    log::info!("║    S/A         - Increase/decrease terrain size        ║");
-    log::info!("║    Escape      - Quit                                  ║");
-    log::info!("╚════════════════════════════════════════════════════════╝");
+    log::info!("╔═══════════════════════════════════════════════════════════════╗");
+    log::info!("║     Procedural River Network Generator                        ║");
+    log::info!("║     Based on Nick McDonald's Procedural Hydrology             ║");
+    log::info!("╠═══════════════════════════════════════════════════════════════╣");
+    log::info!("║  Controls:                                                    ║");
+    log::info!("║    Mouse drag  - Pan the view                                 ║");
+    log::info!("║    Mouse wheel - Zoom in/out                                  ║");
+    log::info!("║    Space       - Generate new random terrain                  ║");
+    log::info!("║    R           - Reset view                                   ║");
+    log::info!("║    +/-         - Adjust river detail (flow threshold)         ║");
+    log::info!("║    E           - Toggle erosion mode (particle vs D8)         ║");
+    log::info!("║    [/]         - Decrease/increase erosion iterations         ║");
+    log::info!("║    S/A         - Increase/decrease terrain size               ║");
+    log::info!("║    Escape      - Quit                                         ║");
+    log::info!("╚═══════════════════════════════════════════════════════════════╝");
 
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -135,9 +186,11 @@ fn main() {
         offset: (0.0, 0.0),
         dragging: false,
         last_mouse_pos: (0.0, 0.0),
-        terrain_size: 1024,
+        terrain_size: 512,  // Smaller default for faster erosion simulation
         flow_threshold: 100.0,
         seed: 42,
+        use_erosion: true,  // Default to particle-based erosion
+        erosion_params: ErosionParams::default(),
         start_time: Instant::now(),
     };
 
@@ -169,6 +222,9 @@ fn main() {
                             PhysicalKey::Code(KeyCode::NumpadAdd) => app.adjust_threshold(-20.0),
                             PhysicalKey::Code(KeyCode::Minus) |
                             PhysicalKey::Code(KeyCode::NumpadSubtract) => app.adjust_threshold(20.0),
+                            PhysicalKey::Code(KeyCode::KeyE) => app.toggle_erosion(),
+                            PhysicalKey::Code(KeyCode::BracketLeft) => app.adjust_iterations(0.5),
+                            PhysicalKey::Code(KeyCode::BracketRight) => app.adjust_iterations(2.0),
                             PhysicalKey::Code(KeyCode::KeyS) => {
                                 // Increase terrain size
                                 app.terrain_size = (app.terrain_size + 256).min(2048);

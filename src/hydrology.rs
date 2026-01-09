@@ -1,7 +1,11 @@
 //! Hydrology simulation for river network generation
-//! Implements D8 flow direction, flow accumulation, and river extraction
+//! Implements both D8 flow direction and particle-based hydraulic erosion
+//!
+//! Based on Nick McDonald's procedural hydrology:
+//! https://nickmcd.me/2020/04/15/procedural-hydrology/
 
 use crate::terrain::Terrain;
+use crate::particle::{self, ErosionParams};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 use rayon::prelude::*;
@@ -85,6 +89,12 @@ pub struct HydrologyData {
     pub watershed_id: Vec<u32>,
     pub river_segments: Vec<RiverSegment>,
     pub num_watersheds: u32,
+    /// Eroded heightmap (if particle simulation was used)
+    pub eroded_heightmap: Option<Vec<f32>>,
+    /// Discharge map from particle simulation
+    pub discharge: Option<Vec<f32>>,
+    /// Momentum maps from particle simulation
+    pub momentum: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl HydrologyData {
@@ -160,7 +170,159 @@ impl HydrologyData {
             watershed_id,
             river_segments,
             num_watersheds,
+            eroded_heightmap: None,
+            discharge: None,
+            momentum: None,
         }
+    }
+
+    /// Run particle-based hydraulic erosion simulation
+    /// This simulates water droplets moving across terrain, eroding and depositing sediment.
+    /// Based on Nick McDonald's procedural hydrology: https://nickmcd.me/2020/04/15/procedural-hydrology/
+    pub fn simulate_with_erosion(
+        terrain: &Terrain,
+        flow_threshold: f32,
+        erosion_params: &ErosionParams,
+        seed: u32,
+    ) -> Self {
+        log::info!("Starting particle-based erosion simulation with {} iterations...",
+            erosion_params.iterations);
+
+        let width = terrain.width;
+        let height = terrain.height;
+
+        // Run particle erosion simulation
+        log::info!("Running particle simulation...");
+        let erosion_result = particle::simulate_erosion(
+            &terrain.heightmap,
+            width,
+            height,
+            erosion_params,
+            seed,
+        );
+
+        // Create a temporary terrain with eroded heightmap for D8 calculation
+        let eroded_terrain = Terrain {
+            width,
+            height,
+            heightmap: erosion_result.heightmap.clone(),
+            config: terrain.config.clone(),
+        };
+
+        // Calculate flow directions on eroded terrain
+        log::info!("Calculating flow directions on eroded terrain...");
+        let flow_direction = Self::calculate_flow_directions(&eroded_terrain);
+
+        // Use discharge map from particle simulation as flow accumulation
+        // This gives much more realistic river networks than simple D8 accumulation
+        let flow_accumulation = erosion_result.discharge.clone();
+
+        // Find max discharge for normalization
+        let max_discharge = flow_accumulation.iter().cloned().fold(0.0f32, f32::max);
+        log::info!("Max discharge: {:.2}", max_discharge);
+
+        // Scale the threshold relative to max discharge
+        let scaled_threshold = (flow_threshold / 100.0) * max_discharge.max(1.0) * 0.01;
+
+        // Delineate watersheds using the eroded terrain
+        log::info!("Delineating watersheds...");
+        let (watershed_id, num_watersheds) = Self::delineate_watersheds(
+            &flow_direction, &flow_accumulation, width, height, scaled_threshold
+        );
+
+        // Calculate stream order
+        log::info!("Calculating stream orders...");
+        let stream_order = Self::calculate_stream_order(
+            &flow_direction, &flow_accumulation, width, height, scaled_threshold
+        );
+
+        // Extract river segments using discharge-based flow
+        log::info!("Extracting river segments from discharge map...");
+        let river_segments = Self::extract_river_segments_from_discharge(
+            &flow_direction,
+            &flow_accumulation,
+            &erosion_result.momentum_x,
+            &erosion_result.momentum_y,
+            &stream_order,
+            &watershed_id,
+            width,
+            height,
+            scaled_threshold,
+        );
+
+        log::info!("Particle erosion complete: {} river segments extracted", river_segments.len());
+
+        Self {
+            width,
+            height,
+            flow_direction,
+            flow_accumulation,
+            stream_order,
+            watershed_id,
+            river_segments,
+            num_watersheds,
+            eroded_heightmap: Some(erosion_result.heightmap),
+            discharge: Some(erosion_result.discharge),
+            momentum: Some((erosion_result.momentum_x, erosion_result.momentum_y)),
+        }
+    }
+
+    /// Extract river segments using discharge and momentum from particle simulation
+    fn extract_river_segments_from_discharge(
+        flow_direction: &[FlowDirection],
+        discharge: &[f32],
+        momentum_x: &[f32],
+        momentum_y: &[f32],
+        stream_order: &[u8],
+        watershed_id: &[u32],
+        width: usize,
+        height: usize,
+        threshold: f32,
+    ) -> Vec<RiverSegment> {
+        let mut segments = Vec::new();
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let flow = discharge[idx];
+
+                if flow >= threshold {
+                    // Use momentum to determine flow direction
+                    let mx = momentum_x[idx];
+                    let my = momentum_y[idx];
+                    let mag = (mx * mx + my * my).sqrt();
+
+                    // Calculate end point based on momentum direction
+                    let (end_x, end_y) = if mag > 0.001 {
+                        let dir_x = mx / mag;
+                        let dir_y = my / mag;
+                        (x as f32 + dir_x, y as f32 + dir_y)
+                    } else {
+                        // Fall back to D8 direction
+                        let dir = flow_direction[idx];
+                        if dir != FlowDirection::None {
+                            let (dx, dy) = dir.offset();
+                            (x as f32 + dx as f32, y as f32 + dy as f32)
+                        } else {
+                            continue;
+                        }
+                    };
+
+                    // Bounds check
+                    if end_x >= 0.0 && end_x < width as f32 && end_y >= 0.0 && end_y < height as f32 {
+                        segments.push(RiverSegment {
+                            start: (x as f32, y as f32),
+                            end: (end_x, end_y),
+                            flow,
+                            stream_order: stream_order[idx],
+                            watershed_id: watershed_id[idx],
+                        });
+                    }
+                }
+            }
+        }
+
+        segments
     }
 
     /// Create a mask of all cells that drain into the single source's river path

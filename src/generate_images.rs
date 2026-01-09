@@ -3,9 +3,11 @@
 
 mod terrain;
 mod hydrology;
+mod particle;
 
 use terrain::{Terrain, TerrainConfig};
 use hydrology::HydrologyData;
+use particle::ErosionParams;
 use image::{Rgb, RgbImage};
 use std::path::Path;
 
@@ -144,13 +146,13 @@ fn draw_circle(img: &mut RgbImage, cx: f32, cy: f32, radius: f32, color: [u8; 3]
     }
 }
 
-fn generate_image(seed: u32, output_path: &Path) {
-    println!("Generating river network with seed {}...", seed);
+fn generate_image(seed: u32, output_path: &Path, use_erosion: bool) {
+    println!("Generating river network with seed {} ({})...",
+        seed, if use_erosion { "particle erosion" } else { "D8 flow" });
 
-    let terrain_size = 1024;
+    let terrain_size = 512;
     let image_size = 2048;
-    let flow_threshold = 1.0;   // Very low threshold to capture all fine tendrils
-    let num_sources = 1;        // Single river source with all its capillary tributaries
+    let flow_threshold = 50.0;
 
     let config = TerrainConfig {
         width: terrain_size,
@@ -160,13 +162,17 @@ fn generate_image(seed: u32, output_path: &Path) {
     };
     let terrain = Terrain::generate(config);
 
-    // Use hybrid model: capillary tributaries + boosted main rivers from sources
-    let hydrology = HydrologyData::simulate_with_sources(
-        &terrain,
-        flow_threshold,
-        seed,
-        num_sources
-    );
+    let hydrology = if use_erosion {
+        // Use particle-based erosion for realistic rivers
+        let erosion_params = ErosionParams {
+            iterations: 50_000,  // Lower for faster generation
+            ..Default::default()
+        };
+        HydrologyData::simulate_with_erosion(&terrain, flow_threshold, &erosion_params, seed)
+    } else {
+        // Use D8 flow direction
+        HydrologyData::simulate(&terrain, flow_threshold)
+    };
 
     println!("  {} river segments", hydrology.river_segments.len());
 
@@ -176,19 +182,21 @@ fn generate_image(seed: u32, output_path: &Path) {
 }
 
 fn main() {
-    println!("╔════════════════════════════════════════════════════════╗");
-    println!("║     Procedural River Network - Image Generator         ║");
-    println!("╚════════════════════════════════════════════════════════╝");
+    println!("╔════════════════════════════════════════════════════════════╗");
+    println!("║     Procedural River Network - Image Generator              ║");
+    println!("║     Using particle-based hydraulic erosion                  ║");
+    println!("╚════════════════════════════════════════════════════════════╝");
     println!();
 
     let images_dir = Path::new("images");
     std::fs::create_dir_all(images_dir).expect("Failed to create images directory");
 
+    // Generate with particle erosion (realistic rivers carved by water)
     let seeds = [42, 1337, 2024, 8675309, 12345];
     for (i, &seed) in seeds.iter().enumerate() {
-        generate_image(seed, &images_dir.join(format!("river_network_{}.png", i + 1)));
+        generate_image(seed, &images_dir.join(format!("river_erosion_{}.png", i + 1)), true);
     }
-    generate_image(42, &images_dir.join("hero.png"));
+    generate_image(42, &images_dir.join("hero.png"), true);
 
-    println!("\nDone! Generated {} images.", seeds.len() + 1);
+    println!("\nDone! Generated {} images with particle erosion.", seeds.len() + 1);
 }
