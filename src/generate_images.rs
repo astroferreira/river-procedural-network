@@ -51,12 +51,12 @@ fn render_river_image(
             0.0
         };
 
-        // Thickness: very thin (0.3px) for smallest, thick (6px) for largest
-        // Use power of 2 for dramatic difference between tributaries and main rivers
-        let thickness = 0.3 + flow_norm.powf(2.0) * 6.0;
+        // Thickness: extremely thin (0.15px) for tiniest tributaries, thick (8px) for main rivers
+        // Use power of 3 for very dramatic difference - tributaries stay thin, main rivers thick
+        let thickness = 0.15 + flow_norm.powf(3.0) * 8.0;
 
         // Brightness: dim for tiny streams, bright for main rivers
-        let brightness = 0.3 + flow_norm * 0.7;
+        let brightness = 0.2 + flow_norm.powf(0.5) * 0.8;
 
         let color = [
             (RIVER_COLOR[0] as f32 * brightness) as u8,
@@ -149,7 +149,7 @@ fn generate_image(seed: u32, output_path: &Path) {
 
     let terrain_size = 1024;
     let image_size = 2048;  // Higher res for fine detail
-    let flow_threshold = 8.0;  // Lower threshold = more fine tributaries
+    let flow_threshold = 4.0;  // Very low threshold = captures finest tributaries
 
     let config = TerrainConfig {
         width: terrain_size,

@@ -525,7 +525,7 @@ impl HydrologyData {
                             segments.push(RiverSegment {
                                 start: (x as f32, y as f32),
                                 end: (nx as f32, ny as f32),
-                                flow: flow.ln().max(0.0), // Log scale for better visualization
+                                flow,  // Raw flow value - rendering will handle normalization
                                 stream_order: stream_order[idx],
                                 watershed_id: watershed_id[idx],
                             });

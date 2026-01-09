@@ -14,8 +14,6 @@ pub struct TerrainConfig {
     pub octaves: usize,
     pub persistence: f64,
     pub lacunarity: f64,
-    pub mountain_influence: f64,
-    pub valley_carving: f64,
 }
 
 impl Default for TerrainConfig {
@@ -24,12 +22,10 @@ impl Default for TerrainConfig {
             width: 1024,
             height: 1024,
             seed: 42,
-            scale: 0.003,
+            scale: 0.004,
             octaves: 8,
             persistence: 0.5,
             lacunarity: 2.0,
-            mountain_influence: 0.6,
-            valley_carving: 0.4,
         }
     }
 }
@@ -45,66 +41,93 @@ pub struct Terrain {
 impl Terrain {
     /// Generate a new terrain from configuration
     pub fn generate(config: TerrainConfig) -> Self {
-        log::info!("Generating terrain {}x{} with seed {}",
-            config.width, config.height, config.seed);
-
-        let fbm: Fbm<Perlin> = Fbm::new(config.seed)
-            .set_octaves(config.octaves)
-            .set_persistence(config.persistence)
-            .set_lacunarity(config.lacunarity);
-
-        // Secondary noise for mountain ridges
-        let ridge_noise: Fbm<Perlin> = Fbm::new(config.seed.wrapping_add(1000))
-            .set_octaves(4)
-            .set_persistence(0.6)
-            .set_lacunarity(2.2);
-
-        // Tertiary noise for valley carving
-        let valley_noise: Fbm<Perlin> = Fbm::new(config.seed.wrapping_add(2000))
-            .set_octaves(6)
-            .set_persistence(0.45)
-            .set_lacunarity(2.1);
-
         let width = config.width;
         let height = config.height;
         let scale = config.scale;
-        let mountain_influence = config.mountain_influence;
-        let valley_carving = config.valley_carving;
 
-        // Generate heightmap
+        // Use seed to create varied but controlled randomness
+        let seed_f = config.seed as f64;
+
+        // Very large scale noise for major drainage divides (mountain ranges)
+        let mountain: Fbm<Perlin> = Fbm::new(config.seed)
+            .set_octaves(2)
+            .set_persistence(0.5)
+            .set_lacunarity(2.0);
+
+        // Medium scale for valleys and sub-basins
+        let valley: Fbm<Perlin> = Fbm::new(config.seed.wrapping_add(100))
+            .set_octaves(4)
+            .set_persistence(0.45)
+            .set_lacunarity(2.0);
+
+        // Fine detail noise - creates small tributaries
+        let detail: Fbm<Perlin> = Fbm::new(config.seed.wrapping_add(200))
+            .set_octaves(6)
+            .set_persistence(0.5)
+            .set_lacunarity(2.5);
+
+        // Very fine noise for micro-tributaries
+        let micro: Fbm<Perlin> = Fbm::new(config.seed.wrapping_add(300))
+            .set_octaves(4)
+            .set_persistence(0.6)
+            .set_lacunarity(3.0);
+
+        // Determine overall tilt direction from seed - this creates the main drainage
+        let tilt_angle = (seed_f * 0.618).sin() * std::f64::consts::PI * 2.0;
+        let tilt_x = tilt_angle.cos();
+        let tilt_y = tilt_angle.sin();
+
+        // Secondary tilt for more complex drainage
+        let tilt2_angle = tilt_angle + std::f64::consts::PI * 0.4;
+        let tilt2_x = tilt2_angle.cos();
+        let tilt2_y = tilt2_angle.sin();
+
         let mut heightmap = Vec::with_capacity(width * height);
 
         for y in 0..height {
             for x in 0..width {
-                let nx = x as f64 * scale;
-                let ny = y as f64 * scale;
+                // Normalized coordinates (0 to 1)
+                let nx = x as f64 / width as f64;
+                let ny = y as f64 / height as f64;
 
-                // Base terrain
-                let base = fbm.get([nx, ny]);
+                // Noise coordinates at different scales
+                let sx = x as f64 * scale;
+                let sy = y as f64 * scale;
 
-                // Ridge mountains (absolute value creates ridges)
-                let ridge = (ridge_noise.get([nx * 0.5, ny * 0.5])).abs();
-                let ridge_contribution = ridge * mountain_influence;
+                // PRIMARY: Strong continental tilt - creates main drainage direction
+                // This is the dominant factor ensuring rivers flow in consistent direction
+                let tilt = (nx - 0.5) * tilt_x + (ny - 0.5) * tilt_y;
+                let base_height = 0.5 + tilt * 0.5;  // Strong gradient
 
-                // Valley carving (squared creates valleys)
-                let valley = valley_noise.get([nx * 0.7, ny * 0.7]);
-                let valley_contribution = valley * valley * valley_carving;
+                // SECONDARY: Mountain ridges perpendicular to main drainage
+                // Creates major drainage divides that funnel water into main channels
+                let mountain_val = mountain.get([sx * 0.15, sy * 0.15]);
+                // Make mountains as ridges perpendicular to tilt
+                let ridge_factor = ((nx - 0.5) * tilt2_x + (ny - 0.5) * tilt2_y).abs();
+                let mountain_height = mountain_val.abs() * 0.25 * (0.3 + ridge_factor);
 
-                // Combine with edge falloff for island-like appearance
-                let cx = (x as f64 / width as f64) * 2.0 - 1.0;
-                let cy = (y as f64 / height as f64) * 2.0 - 1.0;
-                let edge_dist = (cx * cx + cy * cy).sqrt();
-                let edge_falloff = 1.0 - (edge_dist * 0.7).min(1.0).powf(2.0);
+                // TERTIARY: Valley carving - creates sub-basins
+                let valley_val = valley.get([sx * 0.5, sy * 0.5]);
+                let valley_height = valley_val * 0.12;
 
-                // Final height combining all factors
-                let combined = (base + ridge_contribution - valley_contribution) * edge_falloff;
+                // DETAIL: Small-scale roughness for tributaries
+                let detail_val = detail.get([sx * 1.5, sy * 1.5]) * 0.06;
+
+                // MICRO: Very fine detail for tiny tributaries
+                let micro_val = micro.get([sx * 4.0, sy * 4.0]) * 0.025;
+
+                // Edge falloff - rivers drain to edges
+                let edge_dist = (nx.min(1.0 - nx).min(ny.min(1.0 - ny)) * 2.0).min(1.0);
+                let edge_falloff = edge_dist.powf(0.5);
+
+                // Combine: base gradient dominates, smaller features add drainage detail
+                let h = base_height + mountain_height + valley_height + detail_val + micro_val;
+                let h = h * edge_falloff;
 
                 // Normalize to 0-1 range
-                heightmap.push(((combined + 1.0) / 2.0).clamp(0.0, 1.0) as f32);
+                heightmap.push(h.clamp(0.0, 1.0) as f32);
             }
         }
-
-        log::info!("Terrain generation complete");
 
         Self {
             width,
