@@ -217,12 +217,29 @@ impl HydrologyData {
         // This gives much more realistic river networks than simple D8 accumulation
         let flow_accumulation = erosion_result.discharge.clone();
 
-        // Find max discharge for normalization
-        let max_discharge = flow_accumulation.iter().cloned().fold(0.0f32, f32::max);
-        log::info!("Max discharge: {:.2}", max_discharge);
+        // Use percentile-based threshold for consistent river extraction across seeds
+        // Collect non-zero discharge values and find the threshold
+        let mut sorted_discharge: Vec<f32> = flow_accumulation.iter()
+            .copied()
+            .filter(|&d| d > 0.0001)
+            .collect();
+        sorted_discharge.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-        // Scale the threshold relative to max discharge
-        let scaled_threshold = (flow_threshold / 100.0) * max_discharge.max(1.0) * 0.01;
+        let scaled_threshold = if sorted_discharge.is_empty() {
+            0.0
+        } else {
+            // Use percentile: top X% of cells become rivers
+            // flow_threshold of 50 means top 50% of non-zero discharge cells
+            // flow_threshold of 90 means top 10% (more sparse rivers)
+            let percentile = (flow_threshold.clamp(1.0, 99.0) / 100.0) as f32;
+            let idx = ((sorted_discharge.len() as f32) * percentile) as usize;
+            let idx = idx.min(sorted_discharge.len() - 1);
+            sorted_discharge[idx]
+        };
+
+        let max_discharge = flow_accumulation.iter().copied().fold(0.0f32, f32::max);
+        log::info!("Max discharge: {:.2}, threshold ({}th percentile): {:.6}",
+            max_discharge, flow_threshold, scaled_threshold);
 
         // Delineate watersheds using the eroded terrain
         log::info!("Delineating watersheds...");

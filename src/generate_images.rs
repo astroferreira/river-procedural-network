@@ -362,7 +362,8 @@ fn generate_image(seed: u32, output_path: &Path, use_erosion: bool, show_terrain
 
     let terrain_size = 512;
     let image_size = 2048;
-    let flow_threshold = 50.0;
+    // Percentile threshold: 85 means top 15% of discharge cells become rivers
+    let flow_threshold = 85.0;
 
     let config = TerrainConfig {
         width: terrain_size,
@@ -375,7 +376,7 @@ fn generate_image(seed: u32, output_path: &Path, use_erosion: bool, show_terrain
     let hydrology = if use_erosion {
         // Use particle-based erosion for realistic rivers with meandering
         let erosion_params = ErosionParams {
-            iterations: 80_000,
+            iterations: 150_000,  // More iterations for better river definition
             ..Default::default()
         };
         HydrologyData::simulate_with_erosion(&terrain, flow_threshold, &erosion_params, seed)
