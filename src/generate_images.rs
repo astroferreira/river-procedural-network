@@ -149,8 +149,8 @@ fn generate_image(seed: u32, output_path: &Path) {
 
     let terrain_size = 1024;
     let image_size = 2048;
-    let flow_threshold = 25.0;  // Higher threshold = sparser, only significant rivers
-    let num_sources = 60;       // Fewer sources = longer, sparser rivers
+    let flow_threshold = 1.0;   // Very low threshold to capture all fine tendrils
+    let num_sources = 1;        // Single river source with all its capillary tributaries
 
     let config = TerrainConfig {
         width: terrain_size,

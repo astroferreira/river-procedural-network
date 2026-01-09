@@ -121,23 +121,31 @@ impl HydrologyData {
         // Boost flow along main river paths from sources
         Self::boost_source_paths(&flow_direction, &sources, &mut flow_accumulation, width, height);
 
-        // Step 4: Identify watersheds
+        // Step 4: For single source, create a mask of connected watershed
+        let river_mask = if num_sources == 1 && !sources.is_empty() {
+            log::info!("Creating single river watershed mask...");
+            Some(Self::create_single_river_mask(&flow_direction, &sources[0], width, height))
+        } else {
+            None
+        };
+
+        // Step 5: Identify watersheds
         log::info!("Delineating watersheds...");
         let (watershed_id, num_watersheds) = Self::delineate_watersheds(
             &flow_direction, &flow_accumulation, width, height, flow_threshold
         );
 
-        // Step 5: Calculate Strahler stream order
+        // Step 6: Calculate Strahler stream order
         log::info!("Calculating stream orders...");
         let stream_order = Self::calculate_stream_order(
             &flow_direction, &flow_accumulation, width, height, flow_threshold
         );
 
-        // Step 6: Extract river segments for rendering
+        // Step 7: Extract river segments for rendering
         log::info!("Extracting river segments...");
-        let river_segments = Self::extract_river_segments(
+        let river_segments = Self::extract_river_segments_masked(
             &flow_direction, &flow_accumulation, &stream_order, &watershed_id,
-            width, height, flow_threshold
+            width, height, flow_threshold, river_mask.as_deref()
         );
 
         log::info!("Hydrology simulation complete: {} sources, {} river segments",
@@ -155,6 +163,90 @@ impl HydrologyData {
         }
     }
 
+    /// Create a mask of all cells that drain into the single source's river path
+    fn create_single_river_mask(
+        flow_direction: &[FlowDirection],
+        source: &(usize, usize, f32),
+        width: usize,
+        height: usize,
+    ) -> Vec<bool> {
+        let mut mask = vec![false; width * height];
+        let (sx, sy, _) = *source;
+
+        // First, mark the main river path
+        let mut path_cells = Vec::new();
+        let mut x = sx;
+        let mut y = sy;
+        let max_steps = width + height;
+        let mut steps = 0;
+
+        while steps < max_steps {
+            let idx = y * width + x;
+            mask[idx] = true;
+            path_cells.push((x, y));
+
+            let dir = flow_direction[idx];
+            if dir == FlowDirection::None {
+                break;
+            }
+
+            let (dx, dy) = dir.offset();
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+
+            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                break;
+            }
+
+            x = nx as usize;
+            y = ny as usize;
+            steps += 1;
+        }
+
+        // Then, for each cell on the path, trace upstream to find all tributaries
+        for (px, py) in path_cells {
+            Self::mark_upstream_tributaries(flow_direction, &mut mask, px, py, width, height);
+        }
+
+        mask
+    }
+
+    /// Recursively mark all cells that flow into the given cell
+    fn mark_upstream_tributaries(
+        flow_direction: &[FlowDirection],
+        mask: &mut [bool],
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        let mut stack = vec![(x, y)];
+
+        while let Some((cx, cy)) = stack.pop() {
+            // Find all neighbors that flow INTO this cell
+            for dir in FlowDirection::all() {
+                let (dx, dy) = dir.offset();
+                let nx = cx as i32 - dx; // Reverse direction
+                let ny = cy as i32 - dy;
+
+                if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                    let nidx = ny as usize * width + nx as usize;
+
+                    if !mask[nidx] {
+                        let neighbor_dir = flow_direction[nidx];
+                        let (ndx, ndy) = neighbor_dir.offset();
+
+                        // Check if this neighbor flows into current cell
+                        if nx + ndx as i32 == cx as i32 && ny + ndy as i32 == cy as i32 {
+                            mask[nidx] = true;
+                            stack.push((nx as usize, ny as usize));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Generate random source points - spread across the map with some highland bias
     fn generate_source_points(
         terrain: &Terrain,
@@ -165,6 +257,11 @@ impl HydrologyData {
         height: usize,
     ) -> Vec<(usize, usize, f32)> {
         let mut rng = StdRng::seed_from_u64(seed as u64);
+
+        // For single source, find the BEST candidate (longest path from high terrain)
+        if num_sources == 1 {
+            return Self::find_best_single_source(terrain, flow_direction, seed, width, height);
+        }
 
         // Margin from edges - sources start inland
         let margin = 50;
@@ -216,6 +313,55 @@ impl HydrologyData {
         }
 
         sources
+    }
+
+    /// Find the best single source point - longest path from highest terrain
+    fn find_best_single_source(
+        terrain: &Terrain,
+        flow_direction: &[FlowDirection],
+        seed: u32,
+        width: usize,
+        height: usize,
+    ) -> Vec<(usize, usize, f32)> {
+        let mut rng = StdRng::seed_from_u64(seed as u64);
+        let margin = 100; // Start well inland
+
+        let mut best_source: Option<(usize, usize, usize, f32)> = None; // x, y, path_len, height
+
+        // Sample many candidates and pick the best one
+        for _ in 0..5000 {
+            let x = rng.gen_range(margin..width - margin);
+            let y = rng.gen_range(margin..height - margin);
+
+            let idx = y * width + x;
+            let dir = flow_direction[idx];
+
+            if dir == FlowDirection::None {
+                continue;
+            }
+
+            let path_len = Self::trace_path_length(flow_direction, x, y, width, height);
+            let h = terrain.get_height(x, y);
+
+            // Score based on path length and height (prefer long paths from high terrain)
+            let score = path_len as f32 * (0.5 + h);
+
+            if let Some((_, _, best_len, best_h)) = best_source {
+                let best_score = best_len as f32 * (0.5 + best_h);
+                if score > best_score {
+                    best_source = Some((x, y, path_len, h));
+                }
+            } else if path_len > 50 {
+                best_source = Some((x, y, path_len, h));
+            }
+        }
+
+        if let Some((x, y, _, _)) = best_source {
+            // Very strong boost for single river to make it prominent with tendrils
+            vec![(x, y, 500.0)]
+        } else {
+            vec![]
+        }
     }
 
     /// Trace path length from a point to edge/pit
@@ -656,8 +802,8 @@ impl HydrologyData {
         stream_order
     }
 
-    /// Extract river segments for rendering
-    fn extract_river_segments(
+    /// Extract river segments for rendering (with optional mask)
+    fn extract_river_segments_masked(
         flow_direction: &[FlowDirection],
         flow_accumulation: &[f32],
         stream_order: &[u8],
@@ -665,12 +811,21 @@ impl HydrologyData {
         width: usize,
         height: usize,
         flow_threshold: f32,
+        mask: Option<&[bool]>,
     ) -> Vec<RiverSegment> {
         let mut segments = Vec::new();
 
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
+
+                // Skip if masked out
+                if let Some(m) = mask {
+                    if !m[idx] {
+                        continue;
+                    }
+                }
+
                 let flow = flow_accumulation[idx];
 
                 if flow >= flow_threshold {
