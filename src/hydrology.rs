@@ -166,12 +166,12 @@ impl HydrologyData {
     ) -> Vec<(usize, usize, f32)> {
         let mut rng = StdRng::seed_from_u64(seed as u64);
 
-        // Small margin from edges
-        let margin = 15;
+        // Margin from edges - sources start inland
+        let margin = 50;
 
         let mut sources = Vec::with_capacity(num_sources);
         let mut attempts = 0;
-        let max_attempts = num_sources * 100;
+        let max_attempts = num_sources * 200;
 
         while sources.len() < num_sources && attempts < max_attempts {
             attempts += 1;
@@ -186,22 +186,22 @@ impl HydrologyData {
                 continue;
             }
 
-            // Verify the path has reasonable length
+            // Require LONG paths - at least 100 cells to edge for longer rivers
             let path_len = Self::trace_path_length(flow_direction, x, y, width, height);
-            if path_len < 30 {
+            if path_len < 100 {
                 continue;
             }
 
             let h = terrain.get_height(x, y);
 
-            // Moderate highland bias
-            let threshold = rng.gen::<f32>() * 0.4;
+            // Highland bias - prefer higher terrain for source points
+            let threshold = rng.gen::<f32>() * 0.35;
             if h < threshold {
                 continue;
             }
 
-            // Check minimum distance from existing sources
-            let min_dist = (width.min(height) / 25) as f32;
+            // Large minimum distance between sources for sparser coverage
+            let min_dist = (width.min(height) / 10) as f32;
             let too_close = sources.iter().any(|(sx, sy, _): &(usize, usize, f32)| {
                 let dx = x as f32 - *sx as f32;
                 let dy = y as f32 - *sy as f32;
@@ -209,8 +209,8 @@ impl HydrologyData {
             });
 
             if !too_close {
-                // Random source strength - this determines how much to boost the main river
-                let flow_strength = 50.0 + rng.gen::<f32>() * 150.0;
+                // Higher source strength for more prominent rivers
+                let flow_strength = 100.0 + rng.gen::<f32>() * 300.0;
                 sources.push((x, y, flow_strength));
             }
         }
