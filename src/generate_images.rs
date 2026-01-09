@@ -44,19 +44,19 @@ fn render_river_image(
         let x1 = segment.end.0 * scale_x;
         let y1 = segment.end.1 * scale_y;
 
-        // Normalize flow on log scale
-        let flow_norm = if log_max > 0.0 {
-            (segment.flow.ln() / log_max).max(0.0).min(1.0)
+        // Normalize flow on log scale (handle zero/small values)
+        let flow_norm = if max_flow > 1.0 && segment.flow > 0.0 {
+            (segment.flow.ln().max(0.0) / log_max.max(1.0)).clamp(0.0, 1.0)
         } else {
-            0.0
+            (segment.flow / max_flow.max(1.0)).clamp(0.0, 1.0)
         };
 
-        // Thickness: extremely thin (0.15px) for tiniest tributaries, thick (8px) for main rivers
-        // Use power of 3 for very dramatic difference - tributaries stay thin, main rivers thick
-        let thickness = 0.15 + flow_norm.powf(3.0) * 8.0;
+        // Thickness: thin (0.4px) for small streams, thick (7px) for main rivers
+        // Use power of 2.5 for good visual hierarchy
+        let thickness = 0.4 + flow_norm.powf(2.5) * 7.0;
 
-        // Brightness: dim for tiny streams, bright for main rivers
-        let brightness = 0.2 + flow_norm.powf(0.5) * 0.8;
+        // Brightness: slightly dim for small streams, bright for main rivers
+        let brightness = 0.4 + flow_norm.powf(0.4) * 0.6;
 
         let color = [
             (RIVER_COLOR[0] as f32 * brightness) as u8,
@@ -148,8 +148,9 @@ fn generate_image(seed: u32, output_path: &Path) {
     println!("Generating river network with seed {}...", seed);
 
     let terrain_size = 1024;
-    let image_size = 2048;  // Higher res for fine detail
-    let flow_threshold = 4.0;  // Very low threshold = captures finest tributaries
+    let image_size = 2048;
+    let flow_threshold = 0.5;  // Low threshold since sources have explicit flow
+    let num_sources = 150;     // Number of river source points (springs)
 
     let config = TerrainConfig {
         width: terrain_size,
@@ -158,9 +159,16 @@ fn generate_image(seed: u32, output_path: &Path) {
         ..Default::default()
     };
     let terrain = Terrain::generate(config);
-    let hydrology = HydrologyData::simulate(&terrain, flow_threshold);
 
-    println!("  {} river segments", hydrology.river_segments.len());
+    // Use discrete source points for rivers
+    let hydrology = HydrologyData::simulate_with_sources(
+        &terrain,
+        flow_threshold,
+        seed,
+        num_sources
+    );
+
+    println!("  {} river segments from {} sources", hydrology.river_segments.len(), num_sources);
 
     let img = render_river_image(&hydrology, image_size, image_size, terrain_size, terrain_size);
     img.save(output_path).expect("Failed to save image");

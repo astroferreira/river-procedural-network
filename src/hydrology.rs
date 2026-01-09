@@ -2,6 +2,8 @@
 //! Implements D8 flow direction, flow accumulation, and river extraction
 
 use crate::terrain::Terrain;
+use rand::{Rng, SeedableRng};
+use rand::rngs::StdRng;
 use rayon::prelude::*;
 use std::collections::VecDeque;
 
@@ -86,9 +88,19 @@ pub struct HydrologyData {
 }
 
 impl HydrologyData {
-    /// Run full hydrology simulation on terrain
+    /// Run full hydrology simulation on terrain with discrete source points
     pub fn simulate(terrain: &Terrain, flow_threshold: f32) -> Self {
-        log::info!("Starting hydrology simulation...");
+        Self::simulate_with_sources(terrain, flow_threshold, 42, 150)
+    }
+
+    /// Run hydrology simulation with specified number of random source points
+    pub fn simulate_with_sources(
+        terrain: &Terrain,
+        flow_threshold: f32,
+        seed: u32,
+        num_sources: usize,
+    ) -> Self {
+        log::info!("Starting hydrology simulation with {} source points...", num_sources);
 
         let width = terrain.width;
         let height = terrain.height;
@@ -97,31 +109,37 @@ impl HydrologyData {
         log::info!("Calculating flow directions...");
         let flow_direction = Self::calculate_flow_directions(terrain);
 
-        // Step 2: Calculate flow accumulation
-        log::info!("Calculating flow accumulation...");
-        let flow_accumulation = Self::calculate_flow_accumulation(&flow_direction, width, height);
+        // Step 2: Generate random source points (springs) biased toward highlands
+        log::info!("Generating {} source points...", num_sources);
+        let sources = Self::generate_source_points(terrain, seed, num_sources);
 
-        // Step 3: Identify watersheds using pour points at edges
+        // Step 3: Calculate flow accumulation from source points only
+        log::info!("Calculating flow accumulation from sources...");
+        let flow_accumulation = Self::calculate_flow_from_sources(
+            &flow_direction, &sources, width, height
+        );
+
+        // Step 4: Identify watersheds
         log::info!("Delineating watersheds...");
         let (watershed_id, num_watersheds) = Self::delineate_watersheds(
             &flow_direction, &flow_accumulation, width, height, flow_threshold
         );
 
-        // Step 4: Calculate Strahler stream order
+        // Step 5: Calculate Strahler stream order
         log::info!("Calculating stream orders...");
         let stream_order = Self::calculate_stream_order(
             &flow_direction, &flow_accumulation, width, height, flow_threshold
         );
 
-        // Step 5: Extract river segments for rendering
+        // Step 6: Extract river segments for rendering
         log::info!("Extracting river segments...");
         let river_segments = Self::extract_river_segments(
             &flow_direction, &flow_accumulation, &stream_order, &watershed_id,
             width, height, flow_threshold
         );
 
-        log::info!("Hydrology simulation complete: {} watersheds, {} river segments",
-            num_watersheds, river_segments.len());
+        log::info!("Hydrology simulation complete: {} sources, {} river segments",
+            num_sources, river_segments.len());
 
         Self {
             width,
@@ -133,6 +151,161 @@ impl HydrologyData {
             river_segments,
             num_watersheds,
         }
+    }
+
+    /// Generate random source points - spread across the map with some highland bias
+    /// Ensures each source has a valid downstream path
+    fn generate_source_points(
+        terrain: &Terrain,
+        seed: u32,
+        num_sources: usize,
+    ) -> Vec<(usize, usize, f32)> {
+        let mut rng = StdRng::seed_from_u64(seed as u64);
+        let width = terrain.width;
+        let height = terrain.height;
+
+        // First compute flow directions so we can verify sources have valid paths
+        let flow_direction = Self::calculate_flow_directions(terrain);
+
+        // Small margin from edges
+        let margin = 10;
+
+        let mut sources = Vec::with_capacity(num_sources);
+        let mut attempts = 0;
+        let max_attempts = num_sources * 100;
+
+        while sources.len() < num_sources && attempts < max_attempts {
+            attempts += 1;
+
+            // Random position with small margin from edges
+            let x = rng.gen_range(margin..width - margin);
+            let y = rng.gen_range(margin..height - margin);
+
+            let idx = y * width + x;
+            let dir = flow_direction[idx];
+
+            // Source must have a valid downhill direction
+            if dir == FlowDirection::None {
+                continue;
+            }
+
+            // Verify the path reaches the edge (has significant length)
+            let path_len = Self::trace_path_length(&flow_direction, x, y, width, height);
+            if path_len < 20 {
+                continue; // Skip short paths
+            }
+
+            let h = terrain.get_height(x, y);
+
+            // Moderate highland bias - prefer higher terrain but not exclusively
+            let threshold = rng.gen::<f32>() * 0.5;
+            if h < threshold {
+                continue;
+            }
+
+            // Check minimum distance from existing sources
+            let min_dist = (width.min(height) / 20) as f32;
+            let too_close = sources.iter().any(|(sx, sy, _): &(usize, usize, f32)| {
+                let dx = x as f32 - *sx as f32;
+                let dy = y as f32 - *sy as f32;
+                (dx * dx + dy * dy).sqrt() < min_dist
+            });
+
+            if !too_close {
+                // Random initial flow strength (represents spring size)
+                let flow_strength = 1.0 + rng.gen::<f32>() * 2.0;
+                sources.push((x, y, flow_strength));
+            }
+        }
+
+        sources
+    }
+
+    /// Trace path length from a point to edge/pit
+    fn trace_path_length(
+        flow_direction: &[FlowDirection],
+        start_x: usize,
+        start_y: usize,
+        width: usize,
+        height: usize,
+    ) -> usize {
+        let mut x = start_x;
+        let mut y = start_y;
+        let mut steps = 0;
+        let max_steps = width + height;
+
+        while steps < max_steps {
+            let idx = y * width + x;
+            let dir = flow_direction[idx];
+
+            if dir == FlowDirection::None {
+                break;
+            }
+
+            let (dx, dy) = dir.offset();
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+
+            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                break;
+            }
+
+            x = nx as usize;
+            y = ny as usize;
+            steps += 1;
+        }
+
+        steps
+    }
+
+    /// Calculate flow accumulation starting only from source points
+    /// Each cell on a river path gets the accumulated flow from all upstream sources
+    fn calculate_flow_from_sources(
+        flow_direction: &[FlowDirection],
+        sources: &[(usize, usize, f32)],
+        width: usize,
+        height: usize,
+    ) -> Vec<f32> {
+        let mut accumulation = vec![0.0f32; width * height];
+
+        // For each source, trace downstream and mark entire path with accumulated flow
+        for (sx, sy, strength) in sources {
+            let mut x = *sx;
+            let mut y = *sy;
+            let mut steps = 0;
+            let max_steps = width + height; // Max possible path length
+
+            // Mark the source cell itself
+            let idx = y * width + x;
+            accumulation[idx] += *strength;
+
+            while steps < max_steps {
+                steps += 1;
+                let idx = y * width + x;
+                let dir = flow_direction[idx];
+
+                if dir == FlowDirection::None {
+                    break; // Reached edge or pit
+                }
+
+                let (dx, dy) = dir.offset();
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+
+                if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                    break; // Off the map
+                }
+
+                // Add this source's contribution to the downstream cell
+                let nidx = ny as usize * width + nx as usize;
+                accumulation[nidx] += *strength;
+
+                x = nx as usize;
+                y = ny as usize;
+            }
+        }
+
+        accumulation
     }
 
     /// D8 flow direction algorithm
