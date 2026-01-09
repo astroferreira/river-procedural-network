@@ -253,6 +253,8 @@ impl HydrologyData {
         let mut current_id = 0u32;
 
         // Find pour points (edges with high flow accumulation)
+        // Use a higher threshold to identify only MAJOR drainage basins
+        let major_threshold = flow_threshold * 50.0;
         let mut pour_points: Vec<(usize, usize, f32)> = Vec::new();
 
         for x in 0..width {
@@ -260,7 +262,7 @@ impl HydrologyData {
             for &y in &[0, height - 1] {
                 let idx = y * width + x;
                 let flow = flow_accumulation[idx];
-                if flow > flow_threshold * 10.0 {
+                if flow > major_threshold {
                     pour_points.push((x, y, flow));
                 }
             }
@@ -271,7 +273,7 @@ impl HydrologyData {
             for &x in &[0, width - 1] {
                 let idx = y * width + x;
                 let flow = flow_accumulation[idx];
-                if flow > flow_threshold * 10.0 {
+                if flow > major_threshold {
                     pour_points.push((x, y, flow));
                 }
             }
@@ -280,33 +282,98 @@ impl HydrologyData {
         // Sort pour points by flow (largest first)
         pour_points.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
 
+        // Limit to top N watersheds for cleaner visualization
+        let max_watersheds = 30;
+        pour_points.truncate(max_watersheds);
+
         // Trace upstream from each pour point to delineate watershed
-        for (px, py, _) in pour_points {
+        for (px, py, _) in &pour_points {
             let idx = py * width + px;
             if watershed_id[idx] == 0 {
                 current_id += 1;
                 Self::trace_watershed_upstream(
                     flow_direction, &mut watershed_id,
-                    width, height, px, py, current_id
+                    width, height, *px, *py, current_id
                 );
             }
         }
 
-        // Fill remaining unassigned cells
+        // For remaining unassigned cells, trace downstream until we hit
+        // an assigned watershed, then assign to that watershed
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
                 if watershed_id[idx] == 0 {
-                    current_id += 1;
-                    Self::trace_watershed_upstream(
-                        flow_direction, &mut watershed_id,
-                        width, height, x, y, current_id
+                    // Trace downstream to find which watershed this drains to
+                    let target_id = Self::trace_downstream_to_watershed(
+                        flow_direction, &watershed_id,
+                        width, height, x, y
                     );
+
+                    if target_id > 0 {
+                        // Assign this cell and all upstream cells to the target watershed
+                        Self::trace_watershed_upstream(
+                            flow_direction, &mut watershed_id,
+                            width, height, x, y, target_id
+                        );
+                    } else {
+                        // No existing watershed found, create a new small one
+                        current_id += 1;
+                        Self::trace_watershed_upstream(
+                            flow_direction, &mut watershed_id,
+                            width, height, x, y, current_id
+                        );
+                    }
                 }
             }
         }
 
         (watershed_id, current_id)
+    }
+
+    /// Trace downstream from a cell to find which watershed it drains to
+    fn trace_downstream_to_watershed(
+        flow_direction: &[FlowDirection],
+        watershed_id: &[u32],
+        width: usize,
+        height: usize,
+        start_x: usize,
+        start_y: usize,
+    ) -> u32 {
+        let mut x = start_x;
+        let mut y = start_y;
+        let mut steps = 0;
+        let max_steps = width * height; // Prevent infinite loops
+
+        while steps < max_steps {
+            let idx = y * width + x;
+
+            // If we hit an assigned cell, return its watershed
+            if watershed_id[idx] > 0 {
+                return watershed_id[idx];
+            }
+
+            let dir = flow_direction[idx];
+            if dir == FlowDirection::None {
+                // Reached edge or pit
+                return 0;
+            }
+
+            let (dx, dy) = dir.offset();
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+
+            if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
+                // Flowed off the edge
+                return 0;
+            }
+
+            x = nx as usize;
+            y = ny as usize;
+            steps += 1;
+        }
+
+        0
     }
 
     /// Trace upstream to assign watershed ID
