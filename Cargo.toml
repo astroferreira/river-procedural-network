@@ -1,0 +1,28 @@
+[package]
+name = "river-procedural-network"
+version = "0.1.0"
+edition = "2021"
+description = "A beautiful procedural river network generator with GPU-accelerated rendering"
+authors = ["Procedural River Generator"]
+
+[dependencies]
+# Graphics & Windowing
+wgpu = "0.19"
+winit = "0.29"
+pollster = "0.3"
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Math & Noise
+noise = "0.9"
+glam = "0.25"
+rand = "0.8"
+rand_chacha = "0.3"
+
+# Utilities
+env_logger = "0.11"
+log = "0.4"
+rayon = "1.8"
+
+[profile.release]
+opt-level = 3
+lto = true
