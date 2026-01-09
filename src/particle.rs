@@ -1,14 +1,18 @@
 //! Particle-based hydraulic erosion simulation
-//! Based on Nick McDonald's procedural hydrology: https://nickmcd.me/2020/04/15/procedural-hydrology/
+//! Based on Nick McDonald's procedural hydrology:
+//! - https://nickmcd.me/2020/04/15/procedural-hydrology/
+//! - https://nickmcd.me/2023/12/12/meandering-rivers-in-particle-based-hydraulic-erosion-simulations/
 //!
 //! This module implements a particle-based water simulation where droplets:
 //! 1. Spawn at random positions on the terrain
-//! 2. Move downhill following gravity and momentum
+//! 2. Move downhill following gravity and momentum from existing flow
 //! 3. Erode terrain and carry sediment
 //! 4. Deposit sediment when slowing down
 //! 5. Evaporate over time
 //!
-//! The cumulative effect creates realistic river networks through erosion.
+//! Key improvement from 2023: Momentum conservation creates meandering rivers
+//! by having particles follow established flow paths, creating self-reinforcing
+//! channels that naturally meander.
 
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
@@ -40,8 +44,12 @@ pub struct ErosionParams {
     pub min_slope: f32,
     /// Sediment capacity multiplier
     pub capacity_multiplier: f32,
-    /// Momentum transfer rate from discharge map
+    /// Momentum transfer rate from discharge map (key for meandering!)
     pub momentum_transfer: f32,
+    /// Entrainment multiplier - how much sediment can be picked up based on discharge
+    pub entrainment: f32,
+    /// Learning rate for exponential smoothing of discharge/momentum maps
+    pub lrate: f32,
 }
 
 impl Default for ErosionParams {
@@ -52,14 +60,16 @@ impl Default for ErosionParams {
             initial_volume: 1.0,
             min_volume: 0.01,
             evaporation_rate: 0.001,
-            erosion_rate: 0.3,
-            deposition_rate: 0.3,
-            inertia: 0.05,
-            gravity: 4.0,
-            friction: 0.1,
+            erosion_rate: 0.1,
+            deposition_rate: 0.1,
+            inertia: 0.1,
+            gravity: 2.0,
+            friction: 0.05,
             min_slope: 0.0001,
-            capacity_multiplier: 8.0,
-            momentum_transfer: 1.0,
+            capacity_multiplier: 4.0,
+            momentum_transfer: 1.0,  // Key parameter for meandering
+            entrainment: 10.0,       // Sediment entrainment based on discharge
+            lrate: 0.1,              // Exponential smoothing rate
         }
     }
 }
@@ -100,7 +110,7 @@ pub struct ErosionResult {
     pub track: Vec<f32>,
 }
 
-/// Run the particle-based erosion simulation
+/// Run the particle-based erosion simulation with meandering support
 pub fn simulate_erosion(
     heightmap: &[f32],
     width: usize,
@@ -113,76 +123,85 @@ pub fn simulate_erosion(
     // Clone heightmap for modification
     let mut heightmap = heightmap.to_vec();
 
-    // Initialize tracking maps
+    // Initialize maps - these persist across iterations
+    // Discharge tracks cumulative water flow
+    // Momentum tracks flow direction (key for meandering!)
     let mut discharge = vec![0.0f32; width * height];
-    let mut discharge_track = vec![0.0f32; width * height];
     let mut momentum_x = vec![0.0f32; width * height];
     let mut momentum_y = vec![0.0f32; width * height];
+
+    // Tracking maps reset each cycle
+    let mut discharge_track = vec![0.0f32; width * height];
     let mut momentum_x_track = vec![0.0f32; width * height];
     let mut momentum_y_track = vec![0.0f32; width * height];
 
-    // Smoothing rate for discharge/momentum maps
-    let smooth_rate = 0.05;
+    let lrate = params.lrate;
 
-    // Run erosion iterations
-    for i in 0..params.iterations {
-        // Spawn particle at random position (with highland bias)
-        let x = rng.gen_range(1.0..(width - 1) as f32);
-        let y = rng.gen_range(1.0..(height - 1) as f32);
+    // Run erosion in cycles for smoother results
+    let particles_per_cycle = 1000;
+    let num_cycles = params.iterations / particles_per_cycle;
 
-        let mut drop = Drop::new(x, y, params.initial_volume);
-
-        // Simulate particle until it dies
-        while drop.age < params.max_age && drop.volume > params.min_volume {
-            let success = descend(
-                &mut drop,
-                &mut heightmap,
-                &mut discharge_track,
-                &mut momentum_x_track,
-                &mut momentum_y_track,
-                &discharge,
-                &momentum_x,
-                &momentum_y,
-                width,
-                height,
-                params,
-            );
-
-            if !success {
-                break;
-            }
-
-            drop.age += 1;
+    for cycle in 0..num_cycles {
+        // Reset tracking maps at start of each cycle
+        for j in 0..(width * height) {
+            discharge_track[j] = 0.0;
+            momentum_x_track[j] = 0.0;
+            momentum_y_track[j] = 0.0;
         }
 
-        // Deposit remaining sediment when particle dies
-        if drop.sediment > 0.0 {
-            let idx = get_index(drop.pos.0 as usize, drop.pos.1 as usize, width, height);
-            if let Some(i) = idx {
-                heightmap[i] += drop.sediment;
+        // Run particles for this cycle
+        for _ in 0..particles_per_cycle {
+            // Spawn particle at random position
+            let x = rng.gen_range(1.0..(width - 1) as f32);
+            let y = rng.gen_range(1.0..(height - 1) as f32);
+
+            let mut drop = Drop::new(x, y, params.initial_volume);
+
+            // Simulate particle until it dies
+            while drop.age < params.max_age && drop.volume > params.min_volume {
+                let success = descend(
+                    &mut drop,
+                    &mut heightmap,
+                    &mut discharge_track,
+                    &mut momentum_x_track,
+                    &mut momentum_y_track,
+                    &discharge,
+                    &momentum_x,
+                    &momentum_y,
+                    width,
+                    height,
+                    params,
+                );
+
+                if !success {
+                    break;
+                }
+
+                drop.age += 1;
+            }
+
+            // Deposit remaining sediment when particle dies
+            if drop.sediment > 0.0 {
+                let idx = get_index(drop.pos.0 as usize, drop.pos.1 as usize, width, height);
+                if let Some(i) = idx {
+                    heightmap[i] += drop.sediment;
+                }
             }
         }
 
-        // Periodically smooth the tracking maps into the main maps
-        if i % 1000 == 0 {
-            for j in 0..(width * height) {
-                discharge[j] = discharge[j] * (1.0 - smooth_rate) + discharge_track[j] * smooth_rate;
-                momentum_x[j] = momentum_x[j] * (1.0 - smooth_rate) + momentum_x_track[j] * smooth_rate;
-                momentum_y[j] = momentum_y[j] * (1.0 - smooth_rate) + momentum_y_track[j] * smooth_rate;
-
-                // Decay the tracking maps
-                discharge_track[j] *= 0.99;
-                momentum_x_track[j] *= 0.99;
-                momentum_y_track[j] *= 0.99;
-            }
+        // Apply exponential smoothing: blend tracking into main maps
+        // This is key for meandering - established paths persist
+        for j in 0..(width * height) {
+            discharge[j] = (1.0 - lrate) * discharge[j] + lrate * discharge_track[j];
+            momentum_x[j] = (1.0 - lrate) * momentum_x[j] + lrate * momentum_x_track[j];
+            momentum_y[j] = (1.0 - lrate) * momentum_y[j] + lrate * momentum_y_track[j];
         }
-    }
 
-    // Final smoothing
-    for j in 0..(width * height) {
-        discharge[j] = discharge[j] * (1.0 - smooth_rate) + discharge_track[j] * smooth_rate;
-        momentum_x[j] = momentum_x[j] * (1.0 - smooth_rate) + momentum_x_track[j] * smooth_rate;
-        momentum_y[j] = momentum_y[j] * (1.0 - smooth_rate) + momentum_y_track[j] * smooth_rate;
+        // Progress logging
+        if cycle % 10 == 0 && cycle > 0 {
+            let progress = (cycle as f32 / num_cycles as f32) * 100.0;
+            log::debug!("Erosion progress: {:.0}%", progress);
+        }
     }
 
     ErosionResult {
@@ -246,6 +265,7 @@ fn get_index(x: usize, y: usize, width: usize, height: usize) -> Option<usize> {
 }
 
 /// Descend a single step - move particle downhill and perform erosion
+/// Key meandering improvement: momentum transfer from existing flow field
 fn descend(
     drop: &mut Drop,
     heightmap: &mut [f32],
@@ -272,33 +292,57 @@ fn descend(
     // Get terrain gradient (points downhill)
     let (nx, ny) = get_normal(heightmap, x, y, width, height);
 
-    // Get slope magnitude
-    let slope = (nx * nx + ny * ny).sqrt().max(params.min_slope);
-
     // Get current cell for momentum transfer
     let idx = (y as usize) * width + (x as usize);
 
-    // Apply momentum from the discharge map (water follows established paths)
-    let momentum_effect_x = momentum_x[idx] * params.momentum_transfer;
-    let momentum_effect_y = momentum_y[idx] * params.momentum_transfer;
+    // Get existing flow field at this cell
+    let field_mx = momentum_x[idx];
+    let field_my = momentum_y[idx];
+    let field_discharge = discharge[idx];
 
-    // Update velocity with inertia, gravity, and momentum transfer
-    let accel_x = -nx * params.gravity + momentum_effect_x;
-    let accel_y = -ny * params.gravity + momentum_effect_y;
+    // Compute gravity force (downhill)
+    let gravity_x = -nx * params.gravity;
+    let gravity_y = -ny * params.gravity;
 
-    drop.vel.0 = drop.vel.0 * params.inertia + accel_x * (1.0 - params.inertia);
-    drop.vel.1 = drop.vel.1 * params.inertia + accel_y * (1.0 - params.inertia);
+    // Initialize with gravity
+    drop.vel.0 += gravity_x;
+    drop.vel.1 += gravity_y;
+
+    // MEANDERING: Transfer momentum from existing flow field
+    // This is the key improvement from Nick's 2023 blog post
+    // Particles follow established paths, creating self-reinforcing meanders
+    let speed = (drop.vel.0 * drop.vel.0 + drop.vel.1 * drop.vel.1).sqrt();
+    let field_speed = (field_mx * field_mx + field_my * field_my).sqrt();
+
+    if speed > 0.001 && field_speed > 0.001 && field_discharge > 0.001 {
+        // Normalize velocities for dot product
+        let vel_norm_x = drop.vel.0 / speed;
+        let vel_norm_y = drop.vel.1 / speed;
+        let field_norm_x = field_mx / field_speed;
+        let field_norm_y = field_my / field_speed;
+
+        // Dot product: how aligned is particle with existing flow?
+        let alignment = vel_norm_x * field_norm_x + vel_norm_y * field_norm_y;
+
+        // Transfer momentum if somewhat aligned (prevents backwards flow)
+        if alignment > -0.5 {
+            let transfer_strength = params.momentum_transfer / (drop.volume + field_discharge);
+            drop.vel.0 += transfer_strength * field_mx;
+            drop.vel.1 += transfer_strength * field_my;
+        }
+    }
 
     // Apply friction
     drop.vel.0 *= 1.0 - params.friction;
     drop.vel.1 *= 1.0 - params.friction;
 
-    // Calculate speed and normalize movement to 1 pixel step
+    // Recalculate speed after all forces applied
     let speed = (drop.vel.0 * drop.vel.0 + drop.vel.1 * drop.vel.1).sqrt();
     if speed < 0.001 {
         return false;
     }
 
+    // Normalize to 1 pixel step
     let step_x = drop.vel.0 / speed;
     let step_y = drop.vel.1 / speed;
 
@@ -315,53 +359,63 @@ fn descend(
     let new_h = get_height_interp(heightmap, new_x, new_y, width, height);
     let height_diff = h - new_h;
 
-    // Calculate sediment capacity based on speed, slope, and volume
-    let capacity = speed.max(0.1) * slope * drop.volume * params.capacity_multiplier;
+    // Calculate equilibrium sediment capacity
+    // Uses discharge for entrainment (more water = more sediment capacity)
+    // This is from Nick's improved formula
+    let equilibrium = (1.0 + params.entrainment * field_discharge) * height_diff.max(0.0);
+    let capacity = equilibrium * drop.volume * params.capacity_multiplier;
 
-    // Erosion or deposition
-    if drop.sediment < capacity && height_diff > 0.0 {
-        // Erode terrain
-        let erosion = ((capacity - drop.sediment) * params.erosion_rate).min(height_diff);
+    // Sediment transport: move towards equilibrium
+    let diff = capacity - drop.sediment;
+    let effective_rate = if diff > 0.0 {
+        params.erosion_rate
+    } else {
+        params.deposition_rate
+    };
 
-        // Modify heightmap at current position
-        let ix = x as usize;
-        let iy = y as usize;
-        if let Some(i) = get_index(ix, iy, width, height) {
-            heightmap[i] -= erosion * 0.5;
-        }
-        // Also erode neighbors for smoother results
-        for (ox, oy) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-            let nx = (ix as i32 + ox) as usize;
-            let ny = (iy as i32 + oy) as usize;
-            if let Some(i) = get_index(nx, ny, width, height) {
-                heightmap[i] -= erosion * 0.125;
+    let sediment_change = diff * effective_rate;
+
+    // Apply erosion or deposition
+    let ix = x as usize;
+    let iy = y as usize;
+    if let Some(i) = get_index(ix, iy, width, height) {
+        // Negative change = erosion, positive = deposition
+        heightmap[i] -= sediment_change;
+
+        // Lateral erosion: slight erosion to sides creates wider channels
+        // This helps with meandering
+        if sediment_change > 0.001 {
+            let lateral_erosion = sediment_change * 0.1;
+            for (ox, oy) in &[(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let lx = (ix as i32 + ox) as usize;
+                let ly = (iy as i32 + oy) as usize;
+                if let Some(li) = get_index(lx, ly, width, height) {
+                    heightmap[li] -= lateral_erosion * 0.25;
+                }
             }
         }
-
-        drop.sediment += erosion;
-    } else if drop.sediment > capacity {
-        // Deposit sediment
-        let deposit = (drop.sediment - capacity) * params.deposition_rate;
-
-        let ix = x as usize;
-        let iy = y as usize;
-        if let Some(i) = get_index(ix, iy, width, height) {
-            heightmap[i] += deposit;
-        }
-
-        drop.sediment -= deposit;
     }
+
+    drop.sediment += sediment_change;
+    drop.sediment = drop.sediment.max(0.0); // Can't have negative sediment
 
     // Update tracking maps for discharge and momentum
     let new_idx = (new_y as usize) * width + (new_x as usize);
     if new_idx < width * height {
         discharge_track[new_idx] += drop.volume;
-        momentum_x_track[new_idx] += drop.vel.0 * drop.volume;
-        momentum_y_track[new_idx] += drop.vel.1 * drop.volume;
+        // Store normalized momentum scaled by volume
+        momentum_x_track[new_idx] += step_x * drop.volume;
+        momentum_y_track[new_idx] += step_y * drop.volume;
     }
 
-    // Evaporate
+    // Evaporate - conserve sediment mass
+    let old_volume = drop.volume;
     drop.volume *= 1.0 - params.evaporation_rate;
+
+    // Sediment concentration increases as water evaporates
+    if drop.volume > 0.001 {
+        drop.sediment *= old_volume / drop.volume;
+    }
 
     // Update position
     drop.pos = (new_x, new_y);
